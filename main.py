@@ -594,17 +594,29 @@ class EnvClient:
         day = view.get("day")
         if isinstance(day, int):
             brain.day = day
-        # Our seat / role / partner.
-        seat = _as_seat(view.get("seat"))
+        # Our seat / role / partner. Official view shape (kit RULES.txt /
+        # prompt.txt, program/env/server.mjs viewOf): a "you" object
+        # {"seat","name","role","alive","partner":{"seat","name","alive"}|null}.
+        # Legacy top-level "seat"/"role"/"partner*" kept as fallback only.
+        you = view.get("you") if isinstance(view.get("you"), dict) else {}
+        seat = _as_seat(you.get("seat"))
+        if seat is None:
+            seat = _as_seat(view.get("seat"))
         if seat is not None:
             brain.seat = seat
-        role = _norm_role(view.get("role"))
+        role = _norm_role(you.get("role"))
+        if role is None:
+            role = _norm_role(view.get("role"))
         partner = None
-        for key in ("partner", "werewolf_partner", "partner_seat"):
-            if key in view:
-                partner = _as_seat(view.get(key))
-                if partner is not None:
-                    break
+        pyou = you.get("partner")
+        if isinstance(pyou, dict):
+            partner = _as_seat(pyou.get("seat"))
+        if partner is None:
+            for key in ("partner", "werewolf_partner", "partner_seat"):
+                if key in view:
+                    partner = _as_seat(view.get(key))
+                    if partner is not None:
+                        break
         if partner is None and isinstance(view.get("partner_name"), str):
             pass  # name lookup happens after names are built below
         if role is not None:
@@ -682,6 +694,35 @@ class EnvClient:
             elif votes is not None:
                 partner_vote = _as_seat(votes)
             brain.partner_night_vote = partner_vote
+        # Official private record (viewOf): "seerResults" [{"night","seat",
+        # "werewolf"}], "lastProtect" {"night","seat"}, "wolfVotes"
+        # [{"night","seat","target"}]. These are top-level, not "private".
+        sr = view.get("seerResults")
+        if isinstance(sr, list):
+            for ent in sr:
+                if not isinstance(ent, dict):
+                    continue
+                t = _as_seat(ent.get("seat", ent.get("target")))
+                w = ent.get("werewolf")
+                if t is not None and isinstance(w, bool):
+                    brain.note_seer_check(t, "wolf" if w else "village")
+        lp2 = view.get("lastProtect")
+        if isinstance(lp2, dict):
+            s2 = _as_seat(lp2.get("seat"))
+            if s2 is not None:
+                brain.last_protected = s2
+        wv = view.get("wolfVotes")
+        if isinstance(wv, list):
+            pv = None
+            for ent in wv:
+                if not isinstance(ent, dict):
+                    continue
+                vs = _as_seat(ent.get("seat", ent.get("voter")))
+                vt = _as_seat(ent.get("target"))
+                if vt is not None and vs != brain.seat:
+                    pv = vt  # latest partner vote wins
+            if pv is not None:
+                brain.partner_night_vote = pv
         # Public log, in order, consumed once.
         log = view.get("log")
         if isinstance(log, list):
@@ -700,7 +741,7 @@ class EnvClient:
         voter = _as_seat(ent.get("voter"))
         target = _as_seat(ent.get("target"))
         text = ent.get("text", ent.get("message", ent.get("statement", "")))
-        if kind in ("statement", "speak", "say", "talk", "debate"):
+        if kind in ("statement", "speech", "speak", "say", "talk", "debate"):
             if speaker is not None and isinstance(text, str):
                 brain.note_statement(speaker, text)
         elif kind in ("vote", "voted"):
@@ -806,8 +847,9 @@ class EnvClient:
         else:
             # Unknown decision name: fall back to speaking.
             txt = _short(brain.decide_statement())
-            body["text"] = txt if txt else None
-            if not txt:
+            if txt:
+                body["text"] = txt
+            else:
                 body["pass"] = True
 
         status, _ = _http("POST", self.base + "/act", body=body, timeout=30)
